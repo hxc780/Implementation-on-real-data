@@ -1,0 +1,177 @@
+---
+title: "Real data implementation"
+author: "Rebecca Holm"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## start by importing data
+```{r}
+library(readr)
+library(dplyr)
+pph_subset2 <- read_csv("/Users/rebeccaholm/Desktop/MatØk/4. år/Blok 4/Project in stat/pph-subset2.csv")
+#View(pph_subset2)
+
+data1 <- pph_subset2
+```
+
+```{r}
+# List of columns I drop
+columns_to_drop <- c("PrevKryo", "PrevMultbirth", "PrevEpisotomi", "PrevRBC12",
+                     "PrevSAGM", "PrevSekPPHbin", "PrevPrimaryPPHbin", "PrevPPH",
+                     "PrevMultMacro", "PrevMacrosomia4500", "PrevCS")
+
+data_clean <- data1[, !(names(data1) %in% columns_to_drop)]
+
+head(data_clean)
+
+mean(data_clean$intendedCS==1)
+
+```
+
+```{r}
+data_clean <- data_clean %>% 
+  mutate(PPH = ifelse(PPH == "Yes", 1, 0),
+         intendedCS = ifelse(intendedCS == "Yes", 1, 0))
+```
+
+# cross-fitting single learner with full additive method
+
+```{r}
+start_time_smcf <- Sys.time()  
+
+set.seed(8)
+n <- nrow(data_clean)
+folds <- 5
+
+ATE_naive_on_train_data_smcf <- numeric(folds)
+ATE_naive_on_test_data_smcf <- numeric(folds)
+SubEIF_folds_on_train_data_smcf <- numeric(folds)
+SubEIF_folds_on_test_data_smcf <- numeric(folds)
+ATE_naive_smcf <- numeric(folds)
+ATE_onestep_smcf <- numeric(folds)
+EIF_onestep_smcf <- numeric(folds)
+EIF_naive_smcf <- numeric(folds)
+
+
+
+fold_indices <- sample(rep(1:folds, length.out = n))
+
+    for (fold in 1:folds) {
+        train_indices <- which(fold_indices != fold)
+        test_indices <- which(fold_indices == fold)
+        
+        data_train <- data_clean[train_indices, ]
+        data_test <- data_clean[test_indices, ]
+        
+        y_train <- data_train$PPH
+        y_test <- data_test$PPH
+        
+        # Fit and prediction for Y
+        GLM1_on_train_data_smcf <- glm(PPH ~ PrevTotal + PrevFFP + PrevTK + PrevHydram + PrevArgumented + PrevInduced + PrevRetained + PrevPraevBin + PrevAcuteCS + PrevPlannedCS + PrevInstrumental + PrevMAge + PrevPraeecl + PrevAbruptio + PrevStillBirth + PrevMacrosomia45 + PrevPraeterm + PrevRBC + PrevEpisiotomy + PrevTiming + MAlder + intendedCS, data = data_train, family = "binomial")    
+
+    data_1_test <- data_test
+    data_0_test <- data_test
+    data_1_test$intendedCS <- 1
+    data_0_test$intendedCS <- 0
+
+         # We then use the best model to predict Y=1 and Y=0
+        predictions_1_on_test_data <- predict(GLM1_on_train_data_smcf, newdata = data_1_test[, -23], type = "response")
+        predictions_0_on_test_data <- predict(GLM1_on_train_data_smcf, newdata = data_0_test[, -23], type = "response")
+
+        
+        # Save my ATE_naive in a vector
+        ATE_naive_on_test_data_smcf[fold] <- mean(predictions_1_on_test_data) - mean(predictions_0_on_test_data)
+
+        
+        # Propensity score
+
+        GLM1_propensity_train_smcf <- glm(intendedCS ~ PrevTotal + PrevFFP + PrevTK + PrevHydram + PrevArgumented + PrevInduced + PrevRetained + PrevPraevBin + PrevAcuteCS + PrevPlannedCS + PrevInstrumental + PrevMAge + PrevPraeecl + PrevAbruptio + PrevStillBirth + PrevMacrosomia45 + PrevPraeterm + PrevRBC + PrevEpisiotomy + PrevTiming + MAlder, data = data_train[, -23], family = "binomial")
+
+        propensity_scores_on_test_data_smcf <- predict(GLM1_propensity_train_smcf, newdata = data_test[, -c(22,23)], type = "response")
+
+        
+        # Subpart of the Efficient Influence Function (EIF)
+        SubEIF_folds_on_test_data_smcf[fold] <- mean((data_test$intendedCS / propensity_scores_on_test_data_smcf) * (y_test - predictions_1_on_test_data) - ((1 - data_test$intendedCS) / (1 - propensity_scores_on_test_data_smcf)) * (y_test - predictions_0_on_test_data))
+        
+
+    }
+
+
+    EIF_onestep_smcf <- (predictions_1_on_test_data - predictions_0_on_test_data - (ATE_naive_on_test_data_smcf + SubEIF_folds_on_test_data_smcf) + data_test$intendedCS/propensity_scores_on_test_data_smcf * (data_test$PPH - predictions_1_on_test_data) - (1 - data_test$intendedCS)/(1- propensity_scores_on_test_data_smcf) *(data_test$PPH-predictions_0_on_test_data))
+    
+    # Save results
+    ATE_naive_smcf <- mean(ATE_naive_on_test_data_smcf)
+    ATE_subeif <- mean(SubEIF_folds_on_test_data_smcf)
+    ATE_onestep_smcf <- mean(ATE_naive_smcf + ATE_subeif)
+    
+  OS_lb_dsl_cf <- ATE_onestep_smcf - qnorm(0.975)*1/sqrt(n)*sd(EIF_onestep_smcf)
+  OS_ub_dsl_cf <- ATE_onestep_smcf + qnorm(0.975)*1/sqrt(n)*sd(EIF_onestep_smcf)
+
+  
+  ATE_naive_smcf
+  ATE_onestep_smcf
+  
+end_time_smcf <- Sys.time()  
+total_time <- end_time_smcf - start_time_smcf  
+print(total_time)  
+```
+
+```{r}
+print(paste("95% CI for OneStep ATE: (", mean(OS_lb_dsl_cf), ", ", mean(OS_ub_dsl_cf), ")", sep = ""))
+```
+
+
+# Non cross-fitting single learner with full additive method
+
+```{r}
+start_time_real <- Sys.time()  
+
+set.seed(8)
+
+
+    GLM1_real <- glm(PPH ~ PrevFFP + PrevTK + PrevHydram + PrevArgumented + PrevInduced + PrevRetained + PrevPraevBin + PrevAcuteCS + PrevPlannedCS + PrevInstrumental + PrevMAge + PrevPraeecl + PrevAbruptio + PrevStillBirth + PrevMacrosomia45 + PrevPraeterm + PrevRBC + PrevEpisiotomy + PrevTiming + MAlder + intendedCS, data = data_clean, family = "binomial")    
+    
+    data_1_clean <- data_clean
+    data_0_clean <- data_clean
+    data_1_clean$intendedCS <- 1
+    data_1_clean$intendedCS <- 0
+    
+    predictions_GLM1_real <- predict(GLM1_real, newdata = data_1_clean[, -23], type = "response")
+    predictions_GLM0_real <- predict(GLM1_real, newdata = data_0_clean[, -23], type = "response")
+
+    ATE_naive_real <- mean(predictions_GLM1_real) - mean(predictions_GLM0_real)
+
+    GLM1_propensity_real <- glm(intendedCS ~ PrevFFP + PrevTK + PrevHydram + PrevArgumented + PrevInduced + PrevRetained + PrevPraevBin + PrevAcuteCS + PrevPlannedCS + PrevInstrumental + PrevMAge + PrevPraeecl + PrevAbruptio + PrevStillBirth + PrevMacrosomia45 + PrevPraeterm + PrevRBC + PrevEpisiotomy + PrevTiming + MAlder, data = data_clean[,-23], family = "binomial")
+
+    propensity_scores_real <- predict(GLM1_propensity_real, newdata = data_clean[, -c(22,23)], type = "response")
+
+    SubEIF_real <- mean((data_clean$intendedCS / propensity_scores_real) * (data_clean$PPH - predictions_GLM1_real) - ((1 - data_clean$intendedCS) / (1 - propensity_scores_real)) * (data_clean$PPH - predictions_GLM0_real))
+  
+
+    ATE_onestep_real <- ATE_naive_real + SubEIF_real
+    
+    
+        EIF_onestep_real <- (predictions_GLM1_real - (1-predictions_GLM1_real) - (ATE_naive_real + SubEIF_real) + data_clean$intendedCS/propensity_scores_real * (data_clean$PPH - predictions_GLM1_real) - (1 - data_clean$intendedCS)/(1- propensity_scores_real) *(data_clean$PPH-predictions_GLM0_real))
+    
+
+  OS_lb_real <- ATE_onestep_real - qnorm(0.975)*1/sqrt(n)*sd(EIF_onestep_real)
+  OS_ub_real <- ATE_onestep_real + qnorm(0.975)*1/sqrt(n)*sd(EIF_onestep_real)
+
+  ATE_naive_real
+  ATE_onestep_real
+
+
+end_time_real <- Sys.time()  
+total_time_real <- end_time_real - start_time_real  
+print(total_time_real)
+```
+
+```{r}
+print(paste("95% CI for OneStep ATE: (", mean(OS_lb_real), ", ", mean(OS_ub_real), ")", sep = ""))
+```
+
